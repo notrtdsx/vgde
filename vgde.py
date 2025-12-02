@@ -329,6 +329,29 @@ def _check_content_size(response: requests.Response) -> None:
         response._content_checked = True
 
 
+def _log_response_content_preview(response: requests.Response, context: str = "Response") -> None:
+    """
+    Log a preview of response content in debug mode with safe encoding handling.
+
+    This function only logs when DEVELOPER_MODE is enabled. When disabled,
+    this function returns immediately without any action.
+
+    Args:
+        response: The HTTP response object
+        context: Description of the response context for the log message
+    """
+    if not DEVELOPER_MODE:
+        return
+
+    try:
+        if response.encoding is None:
+            response.encoding = 'utf-8'
+        content_preview = response.text[:200]
+        logger.debug(f"{context} content: {content_preview}")
+    except Exception as ex:
+        logger.debug(f"Could not decode {context.lower()} content: {ex}")
+
+
 def fetch_game_data(game_name: str) -> Optional[Dict[str, Any]]:
     """
     Fetches game data from the RAWG API and returns the first result.
@@ -377,16 +400,7 @@ def fetch_game_data(game_name: str) -> Optional[Dict[str, Any]]:
             data = response.json()
         except ValueError as e:
             logger.error(f"Invalid JSON response: {str(e)}")
-            if DEVELOPER_MODE:
-                # Fixed: Safe content logging with encoding handling
-                try:
-                    # Ensure response encoding is set correctly
-                    if response.encoding is None:
-                        response.encoding = 'utf-8'
-                    content_preview = response.text[:200]
-                    logger.debug(f"Response content: {content_preview}")
-                except Exception as ex:
-                    logger.debug(f"Could not decode response content: {ex}")
+            _log_response_content_preview(response, "Response")
             return None
 
         if not _validate_api_response(data):
@@ -418,14 +432,8 @@ def fetch_game_data(game_name: str) -> Optional[Dict[str, Any]]:
         else:
             logger.error(f"HTTP error: {e.response.status_code} - {e.response.reason}")
         
-        if DEVELOPER_MODE and hasattr(e, 'response') and e.response is not None:
-            try:
-                if e.response.encoding is None:
-                    e.response.encoding = 'utf-8'
-                content_preview = e.response.text[:200]
-                logger.debug(f"Response content: {content_preview}")
-            except Exception as ex:
-                logger.debug(f"Could not decode error response content: {ex}")
+        if hasattr(e, 'response') and e.response is not None:
+            _log_response_content_preview(e.response, "Error response")
     except requests.exceptions.RequestException as e:
         logger.error(f"Request error: {str(e)}")
     except ValueError as e:
