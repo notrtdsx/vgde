@@ -333,6 +333,9 @@ def _log_response_content_preview(response: requests.Response, context: str = "R
     """
     Log a preview of response content in debug mode with safe encoding handling.
 
+    This function only logs when DEVELOPER_MODE is enabled. When disabled,
+    this function returns immediately without any action.
+
     Args:
         response: The HTTP response object
         context: Description of the response context for the log message
