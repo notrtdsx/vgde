@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import weakref
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List
@@ -194,11 +195,11 @@ def strip_html_tags(html_text: str) -> str:
         return result[:config.MAX_DESCRIPTION_SIZE] if len(result) > config.MAX_DESCRIPTION_SIZE else result
     except (UnicodeDecodeError, UnicodeError) as e:
         logger.warning(f"HTML parsing failed: {e}")
-        return html_text  # Return original text if parsing fails
+        return ""  # Return empty string instead of unsanitized HTML
     except Exception as e:
         # Log unexpected errors but still handle gracefully
         logger.warning(f"Unexpected error during HTML parsing: {e}")
-        return html_text
+        return ""  # Return empty string instead of unsanitized HTML
 
 def validate_game_name(game_name: str) -> str:
     """
@@ -297,6 +298,10 @@ def _validate_api_response(data: Any) -> bool:
     return True
 
 
+# Track checked response objects to avoid re-checking content size
+# Using WeakSet to prevent memory leaks in long-running processes
+_checked_responses: weakref.WeakSet = weakref.WeakSet()
+
 def _check_content_size(response: requests.Response) -> None:
     """
     Check if response content size is within limits.
@@ -322,11 +327,11 @@ def _check_content_size(response: requests.Response) -> None:
     
     # If no valid content-length header, we need to check actual content size
     # but only read it once when necessary
-    if not content_length_valid and not hasattr(response, '_content_checked'):
+    if not content_length_valid and response not in _checked_responses:
         content = response.content  # This will cache the content
         if len(content) > config.MAX_RESPONSE_SIZE:
             raise ValueError(f"Response content too large: {len(content)} bytes (max {config.MAX_RESPONSE_SIZE})")
-        response._content_checked = True
+        _checked_responses.add(response)
 
 
 def _log_response_content_preview(response: requests.Response, context: str = "Response") -> None:
@@ -378,7 +383,6 @@ def fetch_game_data(game_name: str) -> Optional[Dict[str, Any]]:
             url, 
             params=params, 
             timeout=REQUEST_TIMEOUT,
-            stream=True,  # Enable streaming for size checking
             allow_redirects=True,
             verify=True,  # Always verify SSL certificates
             headers={
@@ -409,7 +413,7 @@ def fetch_game_data(game_name: str) -> Optional[Dict[str, Any]]:
 
         # Since _validate_api_response already confirmed structure, we can safely access results
         results = data['results']
-        if len(results) > 0:
+        if results:
             return results[0]
         else:
             logger.warning(f"No results found for game '{game_name}'.")
@@ -429,6 +433,92 @@ def fetch_game_data(game_name: str) -> Optional[Dict[str, Any]]:
             logger.error("API access forbidden. Check your API key permissions.")
         elif e.response.status_code == 404:
             logger.error("API endpoint not found. The service may be unavailable.")
+        else:
+            logger.error(f"HTTP error: {e.response.status_code} - {e.response.reason}")
+        
+        if hasattr(e, 'response') and e.response is not None:
+            _log_response_content_preview(e.response, "Error response")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Request error: {str(e)}")
+    except ValueError as e:
+        logger.error(f"Data validation error: {str(e)}")
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        if DEVELOPER_MODE:
+            logger.exception("Detailed error information:")
+    return None
+
+
+def fetch_game_details(game_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Fetches complete game details from the RAWG API for a specific game ID.
+    This includes the full description and all other game information.
+
+    Args:
+        game_id (int): The ID of the game to fetch details for.
+
+    Returns:
+        Optional[Dict[str, Any]]: The complete game data or None if not found.
+
+    Raises:
+        RateLimitError: If the API rate limit is exceeded.
+    """
+    url = f"{config.BASE_URL}{config.GAMES_ENDPOINT}/{game_id}"
+    params = {'key': API_KEY}
+
+    try:
+        if DEVELOPER_MODE:
+            safe_params = {k: v if k != 'key' else '[REDACTED]' for k, v in params.items()}
+            logger.debug(f"Fetching game details from: {url} with params: {safe_params}")
+
+        response = requests.get(
+            url, 
+            params=params, 
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=True,
+            verify=True,
+            headers={
+                'User-Agent': 'vgde-game-explorer/1.0',
+                'Accept': 'application/json',
+                'Accept-Encoding': 'gzip, deflate'
+            }
+        )
+        
+        _check_content_size(response)
+
+        if response.status_code == 429:
+            retry_after = response.headers.get('Retry-After', '60')
+            raise RateLimitError(f"API rate limit exceeded. Try again in {retry_after} seconds.")
+            
+        response.raise_for_status()
+        
+        try:
+            data = response.json()
+        except ValueError as e:
+            logger.error(f"Invalid JSON response: {str(e)}")
+            _log_response_content_preview(response, "Response")
+            return None
+
+        # Validate that we got a valid game object (should have an 'id' field)
+        if not isinstance(data, dict) or 'id' not in data:
+            logger.error("Unexpected API response format for game details")
+            return None
+
+        return data
+
+    except requests.exceptions.Timeout:
+        logger.error(f"Request timed out after {REQUEST_TIMEOUT} seconds.")
+    except requests.exceptions.SSLError as e:
+        logger.error("SSL certificate verification failed. The connection is not secure.")
+        if DEVELOPER_MODE:
+            logger.debug(f"SSL Error details: {str(e)}")
+    except requests.exceptions.ConnectionError:
+        logger.error("Network connection error. Please check your internet connection.")
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 403:
+            logger.error("API access forbidden. Check your API key permissions.")
+        elif e.response.status_code == 404:
+            logger.warning(f"Game with ID {game_id} not found.")
         else:
             logger.error(f"HTTP error: {e.response.status_code} - {e.response.reason}")
         
@@ -500,7 +590,11 @@ def display_game_info(game_info: Dict[str, Any]) -> None:
         description = strip_html_tags(game_info['description'])
         if description:  # Check if description is not empty after stripping
             print("\nDescription:")
-            print(description[:config.MAX_DISPLAY_DESCRIPTION] + ("..." if len(description) > config.MAX_DISPLAY_DESCRIPTION else ""))
+            # Simplify truncation logic
+            if len(description) > config.MAX_DISPLAY_DESCRIPTION:
+                print(description[:config.MAX_DISPLAY_DESCRIPTION] + "...")
+            else:
+                print(description)
 
     if game_info['background_image']:
         print(f"\nBackground Image: {game_info['background_image']}")
@@ -551,10 +645,17 @@ def main() -> Optional[Dict[str, Any]]:
 
     # Fixed: Use local variable instead of modifying global
     debug_mode = DEVELOPER_MODE or args.debug
-    if debug_mode:
-        # Reconfigure logger for this session
-        logger.setLevel(logging.DEBUG)
-        logger.debug("Debug mode enabled for this run")
+    if debug_mode and not DEVELOPER_MODE:
+        # Only add debug handler if not already in developer mode
+        # Check if logger is already configured for debug output
+        if logger.level != logging.DEBUG:
+            debug_handler = logging.StreamHandler()
+            debug_handler.setLevel(logging.DEBUG)
+            debug_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            debug_handler.setFormatter(debug_formatter)
+            logger.addHandler(debug_handler)
+            logger.setLevel(logging.DEBUG)
+            logger.debug("Debug mode enabled for this run")
 
     try:
         check_api_key()
@@ -586,7 +687,22 @@ def main() -> Optional[Dict[str, Any]]:
 
         raw_data = fetch_game_data(sanitized_game_name)
         if raw_data:
-            game_info = parse_game_info(raw_data)
+            # Fetch complete game details including description
+            game_id = raw_data.get('id')
+            if game_id:
+                if debug_mode:
+                    logger.debug(f"Fetching complete details for game ID: {game_id}")
+                detailed_data = fetch_game_details(game_id)
+                if detailed_data:
+                    game_info = parse_game_info(detailed_data)
+                else:
+                    # Fallback to search results if detailed fetch fails
+                    logger.warning("Could not fetch detailed game information, using search results")
+                    game_info = parse_game_info(raw_data)
+            else:
+                logger.warning("Game ID not found in search results")
+                game_info = parse_game_info(raw_data)
+            
             display_game_info(game_info)
             return game_info
         else:
