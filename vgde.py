@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import weakref
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List
@@ -298,7 +299,8 @@ def _validate_api_response(data: Any) -> bool:
 
 
 # Track checked response objects to avoid re-checking content size
-_checked_responses = set()
+# Using WeakSet to prevent memory leaks in long-running processes
+_checked_responses: weakref.WeakSet = weakref.WeakSet()
 
 def _check_content_size(response: requests.Response) -> None:
     """
@@ -325,12 +327,11 @@ def _check_content_size(response: requests.Response) -> None:
     
     # If no valid content-length header, we need to check actual content size
     # but only read it once when necessary
-    response_id = id(response)
-    if not content_length_valid and response_id not in _checked_responses:
+    if not content_length_valid and response not in _checked_responses:
         content = response.content  # This will cache the content
         if len(content) > config.MAX_RESPONSE_SIZE:
             raise ValueError(f"Response content too large: {len(content)} bytes (max {config.MAX_RESPONSE_SIZE})")
-        _checked_responses.add(response_id)
+        _checked_responses.add(response)
 
 
 def _log_response_content_preview(response: requests.Response, context: str = "Response") -> None:
@@ -647,13 +648,19 @@ def main() -> Optional[Dict[str, Any]]:
     debug_mode = DEVELOPER_MODE or args.debug
     if debug_mode and not DEVELOPER_MODE:
         # Only add debug handler if not already in developer mode
-        debug_handler = logging.StreamHandler()
-        debug_handler.setLevel(logging.DEBUG)
-        debug_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        debug_handler.setFormatter(debug_formatter)
-        logger.addHandler(debug_handler)
-        logger.setLevel(logging.DEBUG)
-        logger.debug("Debug mode enabled for this run")
+        # Check if debug handler already exists
+        has_debug_handler = any(
+            handler.level == logging.DEBUG 
+            for handler in logger.handlers
+        )
+        if not has_debug_handler:
+            debug_handler = logging.StreamHandler()
+            debug_handler.setLevel(logging.DEBUG)
+            debug_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            debug_handler.setFormatter(debug_formatter)
+            logger.addHandler(debug_handler)
+            logger.setLevel(logging.DEBUG)
+            logger.debug("Debug mode enabled for this run")
 
     try:
         check_api_key()
