@@ -535,7 +535,6 @@ def fetch_game_details(game_id: int) -> Optional[Dict[str, Any]]:
     return None
 
 
-
 def parse_game_info(data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Parses the game information from the API response.
@@ -648,12 +647,8 @@ def main() -> Optional[Dict[str, Any]]:
     debug_mode = DEVELOPER_MODE or args.debug
     if debug_mode and not DEVELOPER_MODE:
         # Only add debug handler if not already in developer mode
-        # Check if debug handler already exists
-        has_debug_handler = any(
-            handler.level == logging.DEBUG 
-            for handler in logger.handlers
-        )
-        if not has_debug_handler:
+        # Check if logger is already configured for debug output
+        if logger.level != logging.DEBUG:
             debug_handler = logging.StreamHandler()
             debug_handler.setLevel(logging.DEBUG)
             debug_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
