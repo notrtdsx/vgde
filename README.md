@@ -44,7 +44,7 @@
 
 1. **Clone the repository**
     ```sh
-    git clone https://github.com/veddevv/vgde.git
+    git clone https://github.com/notrtdsx/vgde.git
     cd vgde
     ```
 
